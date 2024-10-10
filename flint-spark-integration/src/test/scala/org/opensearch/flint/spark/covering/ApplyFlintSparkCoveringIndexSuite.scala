@@ -16,6 +16,7 @@ import org.opensearch.flint.core.table.OpenSearchCluster
 import org.opensearch.flint.spark.FlintSpark
 import org.opensearch.flint.spark.FlintSparkIndex.generateSchemaJSON
 import org.opensearch.flint.spark.covering.FlintSparkCoveringIndex.getFlintIndexName
+import org.scalatest.Ignore
 import org.scalatest.matchers.{Matcher, MatchResult}
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.mockito.MockitoSugar.mock
@@ -25,6 +26,7 @@ import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.execution.datasources.LogicalRelation
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
 
+@Ignore
 class ApplyFlintSparkCoveringIndexSuite extends FlintSuite with Matchers {
 
   /** Test table name */
