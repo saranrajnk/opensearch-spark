@@ -49,7 +49,10 @@ class FlintStatement(
     val langType: String,
     val submitTime: Long,
     var error: Option[String] = None,
-    statementContext: Map[String, Any] = Map.empty[String, Any])
+    statementContext: Map[String, Any] = Map.empty[String, Any],
+    val jobType: String = "dummyJobType",
+    val resultIndex: String = "dummyResultIndex",
+    val dataSource: String = "dummyDataSource") // TODO: Refactor this
     extends ContextualDataStore {
   context = statementContext
 

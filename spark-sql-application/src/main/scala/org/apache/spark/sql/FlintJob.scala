@@ -16,7 +16,6 @@ import org.opensearch.flint.core.metrics.MetricsUtil.registerGauge
 
 import org.apache.spark.SparkConf
 import org.apache.spark.internal.Logging
-import org.apache.spark.sql.FlintREPL.instantiate
 import org.apache.spark.sql.flint.config.FlintSparkConf
 
 /**
@@ -31,12 +30,11 @@ import org.apache.spark.sql.flint.config.FlintSparkConf
  */
 object FlintJob extends Logging with FlintJobExecutor {
   def main(args: Array[String]): Unit = {
-
     /*
      * [x] Call PollForQuery at the top
      * [x] Create conf and sparkSession before PFQ
      * [x] Parse the PFQ response and branch out based on query type
-     * [] Set dynamic max executors and datasource to spark conf after PFQ
+     * [x] Set dynamic max executors and datasource to spark conf after PFQ
      */
     val conf = createSparkConf()
     val sparkSession = createSparkSession(conf)
@@ -54,16 +52,48 @@ object FlintJob extends Logging with FlintJobExecutor {
         "",
         "",
         null,
-        Duration(100, "milliseconds"), // Dummy values
-        0L,
-        0L,
-        0L)
+        Duration.Inf,
+        -1,
+        -1,
+        -1)
       val statementExecutionManager = instantiateStatementExecutionManager(commandContext)
 
-      val flintStament = statementExecutionManager.getNextStatement()
-      logInfo(s"flintStament: ${flintStament}")
+      statementExecutionManager.getNextStatement() match {
+        case Some(flintStatement) =>
+          logInfo(s"Received flintStatement: ${flintStatement}")
+          val queryId = flintStatement.queryId
+          val query = flintStatement.query
+          val resultIndex = flintStatement.resultIndex
+          val dataSource = flintStatement.dataSource
+          val jobType = flintStatement.jobType
 
-      // TODO: Check the jobType by parsing the flintStatement and branch out based on query type
+          if (!jobType.equals(FlintJobType.BATCH) && !jobType.equals(FlintJobType.STREAMING)) {
+            // TODO: Add interactive queries logic here (WP flow)
+            logAndThrow(s"Invalid job type: ${jobType}")
+          }
+
+          conf.set("spark.sql.defaultCatalog", dataSource)
+          configDYNMaxExecutors(conf, jobType)
+
+          val streamingRunningCount = new AtomicInteger(0)
+          val jobOperator =
+            JobOperator(
+              applicationId,
+              jobId,
+              sparkSession,
+              query,
+              queryId,
+              dataSource,
+              resultIndex,
+              jobType,
+              streamingRunningCount)
+          registerGauge(MetricConstants.STREAMING_RUNNING_METRIC, streamingRunningCount)
+          jobOperator.start()
+
+        case _ =>
+          // TODO: Handle this gracefully
+          logAndThrow("No flintStatement received")
+      }
     } else {
       // Non-WP flow
       val (queryOption, resultIndexOption) = parseArgs(args)
@@ -112,8 +142,8 @@ object FlintJob extends Logging with FlintJobExecutor {
 
   // Checks the Spark params and determines whether the job is WP or not
   private def isWarmpoolJob(conf: SparkConf): Boolean = {
-    val isWarmpoolJob = conf.get("spark.flint.job.isWarmpoolJob", "false");
-    isWarmpoolJob.equals("true");
+    val isWarmpoolJob = conf.get("spark.flint.job.isWarmpoolJob", "false")
+    isWarmpoolJob.equals("true")
   }
 
   private def instantiateStatementExecutionManager(
