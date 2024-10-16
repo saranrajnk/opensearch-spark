@@ -12,6 +12,7 @@ import org.opensearch.flint.core.logging.CustomLogging
 import org.opensearch.flint.core.metrics.MetricConstants
 import org.opensearch.flint.core.metrics.MetricsUtil.registerGauge
 
+import org.apache.spark.SparkConf
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.flint.config.FlintSparkConf
 
@@ -30,6 +31,10 @@ object FlintJob extends Logging with FlintJobExecutor {
     val (queryOption, resultIndexOption) = parseArgs(args)
 
     val conf = createSparkConf()
+    val sparkSession = createSparkSession(conf)
+    val applicationId =
+      environmentProvider.getEnvVar("SERVERLESS_EMR_VIRTUAL_CLUSTER_ID", "unknown")
+    val jobId = environmentProvider.getEnvVar("SERVERLESS_EMR_JOB_ID", "unknown")
     val jobType = conf.get("spark.flint.job.type", FlintJobType.BATCH)
     CustomLogging.logInfo(s"""Job type is: ${jobType}""")
     conf.set(FlintSparkConf.JOB_TYPE.key, jobType)
@@ -44,6 +49,29 @@ object FlintJob extends Logging with FlintJobExecutor {
     if (resultIndexOption.isEmpty) {
       logAndThrow("resultIndex is not set")
     }
+    val resultIndex = resultIndexOption.get
+    processStreamingJob(
+      applicationId,
+      jobId,
+      query,
+      queryId,
+      dataSource,
+      resultIndex,
+      jobType,
+      sparkSession,
+      conf)
+  }
+
+  private def processStreamingJob(
+      applicationId: String,
+      jobId: String,
+      query: String,
+      queryId: String,
+      dataSource: String,
+      resultIndex: String,
+      jobType: String,
+      sparkSession: SparkSession,
+      conf: SparkConf): Unit = {
     // https://github.com/opensearch-project/opensearch-spark/issues/138
     /*
      * To execute queries such as `CREATE SKIPPING INDEX ON my_glue1.default.http_logs_plain (`@timestamp` VALUE_SET) WITH (auto_refresh = true)`,
@@ -55,20 +83,16 @@ object FlintJob extends Logging with FlintJobExecutor {
     conf.set("spark.sql.defaultCatalog", dataSource)
     configDYNMaxExecutors(conf, jobType)
 
-    val applicationId =
-      environmentProvider.getEnvVar("SERVERLESS_EMR_VIRTUAL_CLUSTER_ID", "unknown")
-    val jobId = environmentProvider.getEnvVar("SERVERLESS_EMR_JOB_ID", "unknown")
-
     val streamingRunningCount = new AtomicInteger(0)
     val jobOperator =
       JobOperator(
         applicationId,
         jobId,
-        createSparkSession(conf),
+        sparkSession,
         query,
         queryId,
         dataSource,
-        resultIndexOption.get,
+        resultIndex,
         jobType,
         streamingRunningCount)
     registerGauge(MetricConstants.STREAMING_RUNNING_METRIC, streamingRunningCount)
