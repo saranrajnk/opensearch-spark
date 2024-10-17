@@ -266,6 +266,10 @@ object FlintSparkConf {
   val CUSTOM_QUERY_RESULT_WRITER =
     FlintConfig("spark.flint.job.customQueryResultWriter")
       .createOptional()
+  val WARMPOOL_ENABLED =
+    FlintConfig(s"spark.flint.job.warmpoolEnabled")
+      .createWithDefault("false")
+
 }
 
 /**
