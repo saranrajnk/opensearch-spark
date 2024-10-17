@@ -167,6 +167,7 @@ object FlintJob extends Logging with FlintJobExecutor {
     instantiate(
       new StatementExecutionManagerImpl(commandContext),
       spark.conf.get(FlintSparkConf.CUSTOM_STATEMENT_MANAGER.key, ""),
-      spark)
+      spark,
+      "dummySessionId")
   }
 }
