@@ -8,16 +8,20 @@ package org.apache.spark.sql
 
 import java.util.concurrent.atomic.AtomicInteger
 
-import scala.concurrent.duration.Duration
+import scala.concurrent.{ExecutionContext, Future, TimeoutException}
+import scala.concurrent.duration._
+import scala.util.control.NonFatal
 
-import org.opensearch.flint.core.FlintOptions
+import com.codahale.metrics.Timer
+import org.opensearch.flint.common.model.FlintStatement
 import org.opensearch.flint.core.logging.CustomLogging
 import org.opensearch.flint.core.metrics.MetricConstants
-import org.opensearch.flint.core.metrics.MetricsUtil.registerGauge
+import org.opensearch.flint.core.metrics.MetricsUtil.{getTimerContext, incrementCounter, registerGauge, stopTimer}
 
 import org.apache.spark.SparkConf
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.flint.config.FlintSparkConf
+import org.apache.spark.util.ThreadUtils
 
 /**
  * Spark SQL Application entrypoint
@@ -96,7 +100,7 @@ object FlintJob extends Logging with FlintJobExecutor {
     val statementExecutionManager = instantiateStatementExecutionManager(commandContext)
     statementExecutionManager.getNextStatement() match {
       case Some(flintStatement) =>
-        logAndThrow(s"flintStatement received: ${flintStatement}")
+        logInfo(s"flintStatement received: ${flintStatement}")
         val jobType = flintStatement.context.get("jobType").toString
         val dataSource = flintStatement.context.get("dataSource").toString
         val resultIndex = flintStatement.context.get("resultIndex").toString
@@ -119,8 +123,114 @@ object FlintJob extends Logging with FlintJobExecutor {
             sparkSession,
             conf)
         } else {
-          // TODO: Handle interactive queries in WP mode
+          handleInteractiveJob(
+            sparkSession,
+            commandContext,
+            flintStatement,
+            statementExecutionManager,
+            applicationId,
+            jobId,
+            dataSource)
         }
+    }
+  }
+
+  private def handleInteractiveJob(
+      sparkSession: SparkSession,
+      commandContext: CommandContext,
+      flintStatement: FlintStatement,
+      statementExecutionManager: StatementExecutionManager,
+      applicationId: String,
+      jobId: String,
+      dataSource: String): Unit = {
+    val statementRunningCount = new AtomicInteger(0)
+    implicit val ec: ExecutionContext = ExecutionContext.global
+    var dataToWrite: Option[DataFrame] = None
+    val startTime: Long = currentTimeProvider.currentEpochMillis()
+    val queryResultWriter = instantiateQueryResultWriter(sparkSession, commandContext)
+
+    registerGauge(MetricConstants.STATEMENT_RUNNING_METRIC, statementRunningCount)
+    flintStatement.running()
+    statementExecutionManager.updateStatement(flintStatement)
+    statementRunningCount.incrementAndGet()
+    val statementTimerContext = getTimerContext(MetricConstants.STATEMENT_PROCESSING_TIME_METRIC)
+
+    val futurePrepareQueryExecution = Future {
+      statementExecutionManager.prepareStatementExecution()
+    }
+
+    try {
+      val df = statementExecutionManager.executeStatement(flintStatement)
+      dataToWrite = Some(
+        ThreadUtils.awaitResult(futurePrepareQueryExecution, Duration(1, MINUTES)) match {
+          case Right(_) => queryResultWriter.processDataFrame(df, flintStatement, startTime)
+          case Left(error) =>
+            handleCommandFailureAndGetFailedData(
+              applicationId,
+              jobId,
+              sparkSession,
+              dataSource,
+              error,
+              flintStatement,
+              "",
+              startTime)
+        })
+    } catch {
+      case e: TimeoutException =>
+        val error = s"Query execution preparation timed out"
+        CustomLogging.logError(error, e)
+        dataToWrite = Some(
+          handleCommandTimeout(
+            applicationId,
+            jobId,
+            sparkSession,
+            dataSource,
+            error,
+            flintStatement,
+            "",
+            startTime))
+      case NonFatal(e) =>
+        val error = s"An unexpected error occurred: ${e.getMessage}"
+        CustomLogging.logError(error, e)
+        dataToWrite = Some(
+          handleCommandFailureAndGetFailedData(
+            applicationId,
+            jobId,
+            sparkSession,
+            dataSource,
+            error,
+            flintStatement,
+            "",
+            startTime))
+    } finally {
+      try {
+        dataToWrite.foreach(df => queryResultWriter.writeDataFrame(df, flintStatement))
+        if (flintStatement.isRunning || flintStatement.isWaiting) {
+          flintStatement.complete()
+        }
+      } catch {
+        case e: Exception =>
+          val error = s"""Fail to write result of ${flintStatement}, cause: ${e.getMessage}"""
+          CustomLogging.logError(error, e)
+          flintStatement.fail()
+      } finally {
+        statementExecutionManager.updateStatement(flintStatement)
+        recordStatementStateChange(statementRunningCount, flintStatement, statementTimerContext)
+      }
+      statementExecutionManager.terminateStatementExecution()
+    }
+    sparkSession.stop()
+
+    // Check for non-daemon threads that may prevent the driver from shutting down.
+    // Non-daemon threads other than the main thread indicate that the driver is still processing tasks,
+    // which may be due to unresolved bugs in dependencies or threads not being properly shut down.
+    if (terminateJVM && threadPoolFactory.hasNonDaemonThreadsOtherThanMain) {
+      logInfo("A non-daemon thread in the driver is seen.")
+      // Exit the JVM to prevent resource leaks and potential emr-s job hung.
+      // A zero status code is used for a graceful shutdown without indicating an error.
+      // If exiting with non-zero status, emr-s job will fail.
+      // This is a part of the fault tolerance mechanism to handle such scenarios gracefully
+      System.exit(0)
     }
   }
 
@@ -169,5 +279,77 @@ object FlintJob extends Logging with FlintJobExecutor {
       spark.conf.get(FlintSparkConf.CUSTOM_STATEMENT_MANAGER.key, ""),
       spark,
       "dummySessionId")
+  }
+
+  private def handleCommandTimeout(
+      applicationId: String,
+      jobId: String,
+      spark: SparkSession,
+      dataSource: String,
+      error: String,
+      flintStatement: FlintStatement,
+      sessionId: String,
+      startTime: Long) = {
+    spark.sparkContext.cancelJobGroup(flintStatement.queryId)
+    flintStatement.timeout()
+    flintStatement.error = Some(error)
+    super.constructErrorDF(
+      applicationId,
+      jobId,
+      spark,
+      dataSource,
+      flintStatement.state,
+      error,
+      flintStatement.queryId,
+      flintStatement.query,
+      sessionId,
+      startTime)
+  }
+
+  def handleCommandFailureAndGetFailedData(
+      applicationId: String,
+      jobId: String,
+      spark: SparkSession,
+      dataSource: String,
+      error: String,
+      flintStatement: FlintStatement,
+      sessionId: String,
+      startTime: Long): DataFrame = {
+    flintStatement.fail()
+    flintStatement.error = Some(error)
+    super.constructErrorDF(
+      applicationId,
+      jobId,
+      spark,
+      dataSource,
+      flintStatement.state,
+      error,
+      flintStatement.queryId,
+      flintStatement.query,
+      sessionId,
+      startTime)
+  }
+
+  private def recordStatementStateChange(
+      statementRunningCount: AtomicInteger,
+      flintStatement: FlintStatement,
+      statementTimerContext: Timer.Context): Unit = {
+    stopTimer(statementTimerContext)
+    if (statementRunningCount.get() > 0) {
+      statementRunningCount.decrementAndGet()
+    }
+    if (flintStatement.isComplete) {
+      incrementCounter(MetricConstants.STATEMENT_SUCCESS_METRIC)
+    } else if (flintStatement.isFailed) {
+      incrementCounter(MetricConstants.STATEMENT_FAILED_METRIC)
+    }
+  }
+
+  private def instantiateQueryResultWriter(
+      spark: SparkSession,
+      commandContext: CommandContext): QueryResultWriter = {
+    instantiate(
+      new QueryResultWriterImpl(commandContext),
+      spark.conf.get(FlintSparkConf.CUSTOM_QUERY_RESULT_WRITER.key, ""))
   }
 }
