@@ -15,7 +15,7 @@ import scala.util.{Failure, Success, Try}
 import org.opensearch.flint.common.model.FlintStatement
 import org.opensearch.flint.common.scheduler.model.LangType
 import org.opensearch.flint.core.metrics.MetricConstants
-import org.opensearch.flint.core.metrics.MetricsUtil.incrementCounter
+import org.opensearch.flint.core.metrics.MetricsUtil.{incrementCounter, stopTimer}
 import org.opensearch.flint.spark.FlintSpark
 
 import org.apache.spark.internal.Logging
@@ -32,7 +32,8 @@ case class JobOperator(
     dataSource: String,
     resultIndex: String,
     jobType: String,
-    streamingRunningCount: AtomicInteger)
+    streamingRunningCount: AtomicInteger,
+    statementContext: Map[String, Any] = Map.empty[String, Any])
     extends Logging
     with FlintJobExecutor {
 
@@ -77,7 +78,9 @@ case class JobOperator(
         "",
         queryId,
         LangType.SQL,
-        currentTimeProvider.currentEpochMillis())
+        currentTimeProvider.currentEpochMillis(),
+        Option.empty,
+        statementContext)
 
     var exceptionThrown = true
     var error: String = null
