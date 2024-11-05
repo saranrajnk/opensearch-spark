@@ -32,7 +32,8 @@ case class JobOperator(
     dataSource: String,
     resultIndex: String,
     jobType: String,
-    streamingRunningCount: AtomicInteger)
+    streamingRunningCount: AtomicInteger,
+    statementContext: Map[String, Any] = Map.empty[String, Any])
     extends Logging
     with FlintJobExecutor {
 
@@ -80,7 +81,9 @@ case class JobOperator(
         "",
         queryId,
         LangType.SQL,
-        currentTimeProvider.currentEpochMillis())
+        currentTimeProvider.currentEpochMillis(),
+        Option.empty,
+        statementContext)
 
     var exceptionThrown = true
     var error: String = null
