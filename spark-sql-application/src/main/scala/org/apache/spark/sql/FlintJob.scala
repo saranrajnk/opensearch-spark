@@ -42,12 +42,12 @@ object FlintJob extends Logging with FlintJobExecutor {
     val applicationId =
       environmentProvider.getEnvVar("SERVERLESS_EMR_VIRTUAL_CLUSTER_ID", "unknown")
     val jobId = environmentProvider.getEnvVar("SERVERLESS_EMR_JOB_ID", "unknown")
-    val warmpoolEnabled = conf.get(FlintSparkConf.WARMPOOL_ENABLED.key).toBoolean
+    val warmpoolEnabled = conf.get(FlintSparkConf.WARMPOOL_ENABLED.key, "false").toBoolean
 
     if (!warmpoolEnabled) {
-      val jobType = conf.get("spark.flint.job.type", FlintJobType.BATCH)
+      val jobType = sparkSession.conf.get("spark.flint.job.type", FlintJobType.BATCH)
       CustomLogging.logInfo(s"""Job type is: ${jobType}""")
-      conf.set(FlintSparkConf.JOB_TYPE.key, jobType)
+      sparkSession.conf.set(FlintSparkConf.JOB_TYPE.key, jobType)
 
       val dataSource = conf.get("spark.flint.datasource.name", "")
       val query = queryOption.getOrElse(unescapeQuery(conf.get(FlintSparkConf.QUERY.key, "")))
@@ -70,27 +70,30 @@ object FlintJob extends Logging with FlintJobExecutor {
         resultIndex,
         jobType,
         sparkSession,
-        conf)
+        Map.empty)
       return
     }
 
-    handleWarmpoolJob(applicationId, jobId, sparkSession, conf)
+    handleWarmpoolJob(applicationId, jobId, sparkSession)
   }
 
   private def handleWarmpoolJob(
       applicationId: String,
       jobId: String,
-      sparkSession: SparkSession,
-      conf: SparkConf): Unit = {
+      sparkSession: SparkSession): Unit = {
+    sparkSession.conf.set(
+      FlintSparkConf.CUSTOM_SESSION_MANAGER.key,
+      "com.amazon.client.WarmpoolSessionManagerDqsImpl")
+    val sessionManager = instantiateSessionManager(sparkSession)
 
-    val commandContext = CommandContext(
+    var commandContext = CommandContext(
       applicationId,
       jobId,
       sparkSession,
       "", // In WP flow, FlintJob doesn't know the dataSource
       "", // In WP flow, FlintJob doesn't know the jobType
       "", // FlintJob doesn't have sessionId
-      null, // FlintJob doesn't have SessionManager
+      sessionManager, // FlintJob doesn't have SessionManager
       Duration.Inf, // FlintJob doesn't have queryExecutionTimeout
       -1, // FlintJob doesn't have inactivityLimitMillis
       -1, // FlintJob doesn't have queryWaitTimeMillis
@@ -101,17 +104,83 @@ object FlintJob extends Logging with FlintJobExecutor {
     statementExecutionManager.getNextStatement() match {
       case Some(flintStatement) =>
         logInfo(s"flintStatement received: ${flintStatement}")
-        val jobType = flintStatement.context.get("jobType").toString
-        val dataSource = flintStatement.context.get("dataSource").toString
-        val resultIndex = flintStatement.context.get("resultIndex").toString
+        val jobType = flintStatement.context.get("jobType") match {
+          case Some(s: String) => s
+          case _ => ""
+        }
+        val dataSource = flintStatement.context.get("dataSource") match {
+          case Some(s: String) => s
+          case _ => ""
+        }
+        var resultIndex = flintStatement.context.get("resultIndex") match {
+          case Some(s: String) => s
+          case _ => ""
+        }
+
+        val host = flintStatement.context.get("host") match {
+          case Some(s: String) => s
+          case _ => ""
+        }
+
+        val queryResultWriterClas = flintStatement.context.get("queryResultWriterClass") match {
+          case Some(s: String) => s
+          case _ => ""
+        }
+
         val queryId = flintStatement.queryId
         val query = flintStatement.query
 
-        CustomLogging.logInfo(s"""Job type is: ${jobType}""")
-        conf.set(FlintSparkConf.JOB_TYPE.key, jobType)
-        conf.set(FlintSparkConf.DATA_SOURCE_NAME.key, dataSource)
+        logInfo(s"""JobType: ${jobType}""")
+        logInfo(s"""dataSource: ${dataSource}""")
+        logInfo(s"""resultIndex: ${resultIndex}""")
+        if (jobType.isEmpty || dataSource.isEmpty || resultIndex.isEmpty) {
+          logInfo("jobType, dataSource, or resultIndex is not set")
+        }
 
-        if (jobType.equalsIgnoreCase(FlintJobType.STREAMING)) {
+        CustomLogging.logInfo(s"""Job type is: ${jobType}""")
+        sparkSession.conf.set(FlintSparkConf.JOB_TYPE.key, jobType)
+        sparkSession.conf.set(FlintSparkConf.DATA_SOURCE_NAME.key, dataSource)
+        logInfo(s"Job Type from sparkConf: ${sparkSession.conf.get(FlintSparkConf.JOB_TYPE.key)}")
+        logInfo(
+          s"Datasource from sparkConf: ${sparkSession.conf.get(FlintSparkConf.DATA_SOURCE_NAME.key)}")
+
+        if (queryResultWriterClas.nonEmpty) {
+          sparkSession.conf.set(
+            FlintSparkConf.CUSTOM_QUERY_RESULT_WRITER.key,
+            queryResultWriterClas)
+        }
+
+        if (!dataSource.contains("_CWLBasic")) {
+          sparkSession.conf.set(
+            FlintSparkConf.CUSTOM_FLINT_METADATA_LOG_SERVICE_CLASS.key,
+            "com.amazon.client.FlintMetadataLogServiceDqsImpl")
+          sparkSession.conf.set(
+            FlintSparkConf.CUSTOM_FLINT_SCHEDULER_CLASS.key,
+            "com.amazon.client.AsyncQuerySchedulerDqsImpl")
+          sparkSession.conf.set(
+            FlintSparkConf.CUSTOM_FLINT_INDEX_METADATA_SERVICE_CLASS.key,
+            "com.amazon.client.FlintIndexMetadataServiceDqsImpl")
+          sparkSession.conf.set(FlintSparkConf.HOST_ENDPOINT.key, host)
+          sparkSession.conf.set(
+            "spark.datasource.flint.customAWSCredentialsProvider",
+            "com.amazon.fireflower.FireFlowerDataSourceAccessCredentialsProvider")
+          sparkSession.conf.set(
+            "spark.hadoop.fs.s3.bucket.flint-us-west-2-gamma-checkpoint.customAWSCredentialsProvider",
+            "com.amazon.fireflower.FireFlowerDQSMetadataAccessCredentialProvider")
+          sparkSession.conf.set(
+            "spark.hadoop.fs.s3a.aws.credentials.provider",
+            "com.amazon.fireflower.FireFlowerDQSMetadataAccessCredentialProvider")
+        } else {
+          sparkSession.conf.set(FlintSparkConf.HOST_ENDPOINT.key, "localhost")
+          sparkSession.conf.set(
+            "spark.datasource.flint.customAWSCredentialsProvider",
+            "com.amazonaws.emr.AssumeRoleAWSCredentialsProvider")
+          sparkSession.conf.set("spark.flint.datasource.name", "_CWLBasic")
+        }
+
+        if (jobType.equalsIgnoreCase(FlintJobType.STREAMING) || jobType.equalsIgnoreCase(
+            FlintJobType.BATCH)) {
+          resultIndex = resultIndex.split(":").lift(2).getOrElse("defaultStrign");
           processStreamingJob(
             applicationId,
             jobId,
@@ -121,7 +190,7 @@ object FlintJob extends Logging with FlintJobExecutor {
             resultIndex,
             jobType,
             sparkSession,
-            conf)
+            flintStatement.context)
         } else {
           handleInteractiveJob(
             sparkSession,
@@ -147,8 +216,6 @@ object FlintJob extends Logging with FlintJobExecutor {
     implicit val ec: ExecutionContext = ExecutionContext.global
     var dataToWrite: Option[DataFrame] = None
     val startTime: Long = currentTimeProvider.currentEpochMillis()
-    val queryResultWriter = instantiateQueryResultWriter(sparkSession, commandContext)
-
     registerGauge(MetricConstants.STATEMENT_RUNNING_METRIC, statementRunningCount)
     flintStatement.running()
     statementExecutionManager.updateStatement(flintStatement)
@@ -159,8 +226,10 @@ object FlintJob extends Logging with FlintJobExecutor {
       statementExecutionManager.prepareStatementExecution()
     }
 
+    val queryResultWriter = instantiateQueryResultWriter(sparkSession, commandContext)
     try {
       val df = statementExecutionManager.executeStatement(flintStatement)
+
       dataToWrite = Some(
         ThreadUtils.awaitResult(futurePrepareQueryExecution, Duration(1, MINUTES)) match {
           case Right(_) => queryResultWriter.processDataFrame(df, flintStatement, startTime)
@@ -243,7 +312,7 @@ object FlintJob extends Logging with FlintJobExecutor {
       resultIndex: String,
       jobType: String,
       sparkSession: SparkSession,
-      conf: SparkConf): Unit = {
+      statementContext: Map[String, Any]): Unit = {
     // https://github.com/opensearch-project/opensearch-spark/issues/138
     /*
      * To execute queries such as `CREATE SKIPPING INDEX ON my_glue1.default.http_logs_plain (`@timestamp` VALUE_SET) WITH (auto_refresh = true)`,
@@ -252,8 +321,11 @@ object FlintJob extends Logging with FlintJobExecutor {
      * By doing this, we effectively map `my_glue1` to AWS Glue, allowing Spark to resolve the database and table names correctly.
      * Without this setup, Spark would not recognize names in the format `my_glue1.default`.
      */
-    conf.set("spark.sql.defaultCatalog", dataSource)
-    configDYNMaxExecutors(conf, jobType)
+    sparkSession.conf.set("spark.sql.defaultCatalog", dataSource)
+//    sparkSession.conf.set(
+//      "spark.dynamicAllocation.maxExecutors",
+//      sparkSession.conf
+//        .get("spark.flint.streaming.dynamicAllocation.maxExecutors", "10"))
 
     val streamingRunningCount = new AtomicInteger(0)
     val jobOperator =
@@ -266,7 +338,8 @@ object FlintJob extends Logging with FlintJobExecutor {
         dataSource,
         resultIndex,
         jobType,
-        streamingRunningCount)
+        streamingRunningCount,
+        statementContext)
     registerGauge(MetricConstants.STREAMING_RUNNING_METRIC, streamingRunningCount)
     jobOperator.start()
   }
@@ -279,6 +352,13 @@ object FlintJob extends Logging with FlintJobExecutor {
       spark.conf.get(FlintSparkConf.CUSTOM_STATEMENT_MANAGER.key, ""),
       spark,
       "dummySessionId")
+  }
+
+  private def instantiateSessionManager(sparkSession: SparkSession): SessionManager = {
+    instantiate(
+      new SessionManagerImpl(sparkSession, Some("something")),
+      sparkSession.conf.get(FlintSparkConf.CUSTOM_SESSION_MANAGER.key, ""),
+      "dummy")
   }
 
   private def handleCommandTimeout(
@@ -348,6 +428,7 @@ object FlintJob extends Logging with FlintJobExecutor {
   private def instantiateQueryResultWriter(
       spark: SparkSession,
       commandContext: CommandContext): QueryResultWriter = {
+
     instantiate(
       new QueryResultWriterImpl(commandContext),
       spark.conf.get(FlintSparkConf.CUSTOM_QUERY_RESULT_WRITER.key, ""))

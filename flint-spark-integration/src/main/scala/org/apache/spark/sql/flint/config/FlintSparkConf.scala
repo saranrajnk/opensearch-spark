@@ -12,6 +12,7 @@ import scala.collection.JavaConverters.mapAsJavaMapConverter
 
 import org.opensearch.flint.core.FlintOptions
 import org.opensearch.flint.core.http.FlintRetryOptions
+import org.opensearch.flint.core.logging.CustomLogging
 
 import org.apache.spark.internal.config.ConfigReader
 import org.apache.spark.network.util.ByteUnit
@@ -367,6 +368,9 @@ case class FlintSparkConf(properties: JMap[String, String]) extends Serializable
         case (key, value) => Some(key, value.get)
       }
       .toMap
+
+    val temp = (optionsWithDefault ++ optionsWithoutDefault).asJava
+    CustomLogging.logInfo(s"FlintOptions from scala: ${temp}")
 
     new FlintOptions((optionsWithDefault ++ optionsWithoutDefault).asJava)
   }
