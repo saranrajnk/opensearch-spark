@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import Dependencies._
+import sbtassembly.AssemblyPlugin.autoImport.ShadeRule
 
 lazy val scala212 = "2.12.14"
 lazy val sparkVersion = "3.5.1"
@@ -21,7 +22,7 @@ val sparkMinorVersion = sparkVersion.split("\\.").take(2).mkString(".")
 
 ThisBuild / organization := "org.opensearch"
 
-ThisBuild / version := "0.6.0-SNAPSHOT"
+ThisBuild / version := "0.7.0-SNAPSHOT"
 
 ThisBuild / scalaVersion := scala212
 
@@ -43,7 +44,35 @@ lazy val compileScalastyle = taskKey[Unit]("compileScalastyle")
 // Run as part of test task.
 lazy val testScalastyle = taskKey[Unit]("testScalastyle")
 
+// Explanation:
+// - ThisBuild / assemblyShadeRules sets the shading rules for the entire build
+// - ShadeRule.rename(...) creates a rule to rename multiple package patterns
+// - "shaded.@0" means prepend "shaded." to the original package name
+// - .inAll applies the rule to all dependencies, not just direct dependencies
+val packagesToShade = Seq(
+  "com.amazonaws.cloudwatch.**",
+  "com.fasterxml.jackson.core.**",
+  "com.fasterxml.jackson.dataformat.**",
+  "com.fasterxml.jackson.databind.**",
+  "com.sun.jna.**",
+  "com.thoughtworks.paranamer.**",
+  "javax.annotation.**",
+  "org.apache.commons.codec.**",
+  "org.apache.commons.logging.**",
+  "org.apache.hc.**",
+  "org.apache.http.**",
+  "org.glassfish.json.**",
+  "org.joda.time.**",
+  "org.reactivestreams.**",
+  "org.yaml.**",
+  "software.amazon.**"
+)
 
+ThisBuild / assemblyShadeRules := Seq(
+  ShadeRule.rename(
+    packagesToShade.map(_ -> "shaded.flint.@0"): _*
+  ).inAll
+)
 
 lazy val commonSettings = Seq(
   javacOptions ++= Seq("-source", "11"),
@@ -89,6 +118,8 @@ lazy val flintCore = (project in file("flint-core"))
       "com.amazonaws" % "aws-java-sdk-cloudwatch" % "1.12.593"
         exclude("com.fasterxml.jackson.core", "jackson-databind"),
       "software.amazon.awssdk" % "auth-crt" % "2.28.10",
+      "com.fasterxml.jackson.core" % "jackson-core" % jacksonVersion,
+      "com.fasterxml.jackson.core" % "jackson-databind" % jacksonVersion,
       "org.projectlombok" % "lombok" % "1.18.30" % "provided",
       "org.scalactic" %% "scalactic" % "3.2.15" % "test",
       "org.scalatest" %% "scalatest" % "3.2.15" % "test",
@@ -238,6 +269,7 @@ lazy val integtest = (project in file("integ-test"))
     inConfig(IntegrationTest)(Defaults.testSettings ++ Seq(
       IntegrationTest / javaSource := baseDirectory.value / "src/integration/java",
       IntegrationTest / scalaSource := baseDirectory.value / "src/integration/scala",
+      IntegrationTest / resourceDirectory := baseDirectory.value / "src/integration/resources",
       IntegrationTest / parallelExecution := false,
       IntegrationTest / fork := true,
     )),
