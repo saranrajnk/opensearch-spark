@@ -164,12 +164,6 @@ object FlintJob extends Logging with FlintJobExecutor {
           sparkSession.conf.set(
             "spark.datasource.flint.customAWSCredentialsProvider",
             "com.amazon.fireflower.FireFlowerDataSourceAccessCredentialsProvider")
-          sparkSession.conf.set(
-            "spark.hadoop.fs.s3.bucket.flint-us-west-2-gamma-checkpoint.customAWSCredentialsProvider",
-            "com.amazon.fireflower.FireFlowerDQSMetadataAccessCredentialProvider")
-          sparkSession.conf.set(
-            "spark.hadoop.fs.s3a.aws.credentials.provider",
-            "com.amazon.fireflower.FireFlowerDQSMetadataAccessCredentialProvider")
         } else {
           sparkSession.conf.set(FlintSparkConf.HOST_ENDPOINT.key, "localhost")
           sparkSession.conf.set(
