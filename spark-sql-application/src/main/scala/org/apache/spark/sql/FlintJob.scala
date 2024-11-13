@@ -34,6 +34,9 @@ import org.apache.spark.util.ThreadUtils
  *   write sql query result to given opensearch index
  */
 object FlintJob extends Logging with FlintJobExecutor {
+
+  private val statementRunningCount = new AtomicInteger(0)
+
   def main(args: Array[String]): Unit = {
     val (queryOption, resultIndexOption) = parseArgs(args)
 
@@ -100,102 +103,128 @@ object FlintJob extends Logging with FlintJobExecutor {
       -1 // FlintJob doesn't have queryLoopExecutionFrequency
     )
 
+    registerGauge(MetricConstants.STATEMENT_RUNNING_METRIC, statementRunningCount)
     val statementExecutionManager = instantiateStatementExecutionManager(commandContext)
-    statementExecutionManager.getNextStatement() match {
-      case Some(flintStatement) =>
-        logInfo(s"flintStatement received: ${flintStatement}")
-        val jobType = flintStatement.context.get("jobType") match {
-          case Some(s: String) => s
-          case _ => ""
-        }
-        val dataSource = flintStatement.context.get("dataSource") match {
-          case Some(s: String) => s
-          case _ => ""
-        }
-        var resultIndex = flintStatement.context.get("resultIndex") match {
-          case Some(s: String) => s
-          case _ => ""
-        }
+    var counter = 0
 
-        val host = flintStatement.context.get("host") match {
-          case Some(s: String) => s
-          case _ => ""
+    while (counter < 2) {
+      try {
+        counter = counter + 1;
+        statementExecutionManager.getNextStatement() match {
+          case Some(flintStatement) =>
+            logInfo(s"flintStatement received: ${flintStatement}")
+            val jobType = flintStatement.context.get("jobType") match {
+              case Some(s: String) => s
+              case _ => ""
+            }
+            val dataSource = flintStatement.context.get("dataSource") match {
+              case Some(s: String) => s
+              case _ => ""
+            }
+            var resultIndex = flintStatement.context.get("resultIndex") match {
+              case Some(s: String) => s
+              case _ => ""
+            }
+
+            val host = flintStatement.context.get("host") match {
+              case Some(s: String) => s
+              case _ => ""
+            }
+
+            val queryResultWriterClas =
+              flintStatement.context.get("queryResultWriterClass") match {
+                case Some(s: String) => s
+                case _ => ""
+              }
+
+            val queryId = flintStatement.queryId
+            val query = flintStatement.query
+
+            logInfo(s"""JobType: ${jobType}""")
+            logInfo(s"""dataSource: ${dataSource}""")
+            logInfo(s"""resultIndex: ${resultIndex}""")
+            if (jobType.isEmpty || dataSource.isEmpty || resultIndex.isEmpty) {
+              logInfo("jobType, dataSource, or resultIndex is not set")
+            }
+
+            CustomLogging.logInfo(s"""Job type is: ${jobType}""")
+            sparkSession.conf.set(FlintSparkConf.JOB_TYPE.key, jobType)
+            sparkSession.conf.set(FlintSparkConf.DATA_SOURCE_NAME.key, dataSource)
+            logInfo(
+              s"Job Type from sparkConf: ${sparkSession.conf.get(FlintSparkConf.JOB_TYPE.key)}")
+            logInfo(
+              s"Datasource from sparkConf: ${sparkSession.conf.get(FlintSparkConf.DATA_SOURCE_NAME.key)}")
+
+            if (queryResultWriterClas.nonEmpty) {
+              sparkSession.conf.set(
+                FlintSparkConf.CUSTOM_QUERY_RESULT_WRITER.key,
+                queryResultWriterClas)
+            }
+
+            if (!dataSource.contains("_CWLBasic")) {
+              sparkSession.conf.set(
+                FlintSparkConf.CUSTOM_FLINT_METADATA_LOG_SERVICE_CLASS.key,
+                "com.amazon.client.FlintMetadataLogServiceDqsImpl")
+              sparkSession.conf.set(
+                FlintSparkConf.CUSTOM_FLINT_SCHEDULER_CLASS.key,
+                "com.amazon.client.AsyncQuerySchedulerDqsImpl")
+              sparkSession.conf.set(
+                FlintSparkConf.CUSTOM_FLINT_INDEX_METADATA_SERVICE_CLASS.key,
+                "com.amazon.client.FlintIndexMetadataServiceDqsImpl")
+              sparkSession.conf.set(FlintSparkConf.HOST_ENDPOINT.key, host)
+              sparkSession.conf.set(
+                "spark.datasource.flint.customAWSCredentialsProvider",
+                "com.amazon.fireflower.FireFlowerDataSourceAccessCredentialsProvider")
+            } else {
+              sparkSession.conf.set(FlintSparkConf.HOST_ENDPOINT.key, "localhost")
+              sparkSession.conf.set(
+                "spark.datasource.flint.customAWSCredentialsProvider",
+                "com.amazonaws.emr.AssumeRoleAWSCredentialsProvider")
+              sparkSession.conf.set("spark.flint.datasource.name", "_CWLBasic")
+            }
+
+            if (jobType.equalsIgnoreCase(FlintJobType.STREAMING) || jobType.equalsIgnoreCase(
+                FlintJobType.BATCH)) {
+              resultIndex = resultIndex.split(":").lift(2).getOrElse("defaultStrign");
+              processStreamingJob(
+                applicationId,
+                jobId,
+                query,
+                queryId,
+                dataSource,
+                resultIndex,
+                jobType,
+                sparkSession,
+                flintStatement.context)
+            } else {
+              handleInteractiveJob(
+                sparkSession,
+                commandContext,
+                flintStatement,
+                statementExecutionManager,
+                applicationId,
+                jobId,
+                dataSource)
+            }
         }
-
-        val queryResultWriterClas = flintStatement.context.get("queryResultWriterClass") match {
-          case Some(s: String) => s
-          case _ => ""
-        }
-
-        val queryId = flintStatement.queryId
-        val query = flintStatement.query
-
-        logInfo(s"""JobType: ${jobType}""")
-        logInfo(s"""dataSource: ${dataSource}""")
-        logInfo(s"""resultIndex: ${resultIndex}""")
-        if (jobType.isEmpty || dataSource.isEmpty || resultIndex.isEmpty) {
-          logInfo("jobType, dataSource, or resultIndex is not set")
-        }
-
-        CustomLogging.logInfo(s"""Job type is: ${jobType}""")
-        sparkSession.conf.set(FlintSparkConf.JOB_TYPE.key, jobType)
-        sparkSession.conf.set(FlintSparkConf.DATA_SOURCE_NAME.key, dataSource)
-        logInfo(s"Job Type from sparkConf: ${sparkSession.conf.get(FlintSparkConf.JOB_TYPE.key)}")
-        logInfo(
-          s"Datasource from sparkConf: ${sparkSession.conf.get(FlintSparkConf.DATA_SOURCE_NAME.key)}")
-
-        if (queryResultWriterClas.nonEmpty) {
-          sparkSession.conf.set(
-            FlintSparkConf.CUSTOM_QUERY_RESULT_WRITER.key,
-            queryResultWriterClas)
-        }
-
-        if (!dataSource.contains("_CWLBasic")) {
-          sparkSession.conf.set(
-            FlintSparkConf.CUSTOM_FLINT_METADATA_LOG_SERVICE_CLASS.key,
-            "com.amazon.client.FlintMetadataLogServiceDqsImpl")
-          sparkSession.conf.set(
-            FlintSparkConf.CUSTOM_FLINT_SCHEDULER_CLASS.key,
-            "com.amazon.client.AsyncQuerySchedulerDqsImpl")
-          sparkSession.conf.set(
-            FlintSparkConf.CUSTOM_FLINT_INDEX_METADATA_SERVICE_CLASS.key,
-            "com.amazon.client.FlintIndexMetadataServiceDqsImpl")
-          sparkSession.conf.set(FlintSparkConf.HOST_ENDPOINT.key, host)
-          sparkSession.conf.set(
-            "spark.datasource.flint.customAWSCredentialsProvider",
-            "com.amazon.fireflower.FireFlowerDataSourceAccessCredentialsProvider")
-        } else {
-          sparkSession.conf.set(FlintSparkConf.HOST_ENDPOINT.key, "localhost")
-          sparkSession.conf.set(
-            "spark.datasource.flint.customAWSCredentialsProvider",
-            "com.amazonaws.emr.AssumeRoleAWSCredentialsProvider")
-          sparkSession.conf.set("spark.flint.datasource.name", "_CWLBasic")
-        }
-
-        if (jobType.equalsIgnoreCase(FlintJobType.STREAMING) || jobType.equalsIgnoreCase(
-            FlintJobType.BATCH)) {
-          resultIndex = resultIndex.split(":").lift(2).getOrElse("defaultStrign");
-          processStreamingJob(
-            applicationId,
-            jobId,
-            query,
-            queryId,
-            dataSource,
-            resultIndex,
-            jobType,
-            sparkSession,
-            flintStatement.context)
-        } else {
-          handleInteractiveJob(
-            sparkSession,
-            commandContext,
-            flintStatement,
-            statementExecutionManager,
-            applicationId,
-            jobId,
-            dataSource)
-        }
+      } catch {
+        case e: Throwable =>
+          CustomLogging.logInfo(s"""Execution failed with: ${e.printStackTrace()}""")
+      }
     }
+
+    // Check for non-daemon threads that may prevent the driver from shutting down.
+    // Non-daemon threads other than the main thread indicate that the driver is still processing tasks,
+    // which may be due to unresolved bugs in dependencies or threads not being properly shut down.
+    if (terminateJVM && threadPoolFactory.hasNonDaemonThreadsOtherThanMain) {
+      logInfo("A non-daemon thread in the driver is seen.")
+      // Exit the JVM to prevent resource leaks and potential emr-s job hung.
+      // A zero status code is used for a graceful shutdown without indicating an error.
+      // If exiting with non-zero status, emr-s job will fail.
+      // This is a part of the fault tolerance mechanism to handle such scenarios gracefully
+      System.exit(0)
+    }
+    sparkSession.stop()
   }
 
   private def handleInteractiveJob(
@@ -206,11 +235,9 @@ object FlintJob extends Logging with FlintJobExecutor {
       applicationId: String,
       jobId: String,
       dataSource: String): Unit = {
-    val statementRunningCount = new AtomicInteger(0)
     implicit val ec: ExecutionContext = ExecutionContext.global
     var dataToWrite: Option[DataFrame] = None
     val startTime: Long = currentTimeProvider.currentEpochMillis()
-    registerGauge(MetricConstants.STATEMENT_RUNNING_METRIC, statementRunningCount)
     flintStatement.running()
     statementExecutionManager.updateStatement(flintStatement)
     statementRunningCount.incrementAndGet()
@@ -281,19 +308,6 @@ object FlintJob extends Logging with FlintJobExecutor {
         recordStatementStateChange(statementRunningCount, flintStatement, statementTimerContext)
       }
       statementExecutionManager.terminateStatementExecution()
-    }
-    sparkSession.stop()
-
-    // Check for non-daemon threads that may prevent the driver from shutting down.
-    // Non-daemon threads other than the main thread indicate that the driver is still processing tasks,
-    // which may be due to unresolved bugs in dependencies or threads not being properly shut down.
-    if (terminateJVM && threadPoolFactory.hasNonDaemonThreadsOtherThanMain) {
-      logInfo("A non-daemon thread in the driver is seen.")
-      // Exit the JVM to prevent resource leaks and potential emr-s job hung.
-      // A zero status code is used for a graceful shutdown without indicating an error.
-      // If exiting with non-zero status, emr-s job will fail.
-      // This is a part of the fault tolerance mechanism to handle such scenarios gracefully
-      System.exit(0)
     }
   }
 
