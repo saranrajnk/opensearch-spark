@@ -366,7 +366,7 @@ object FlintJob extends Logging with FlintJobExecutor {
     instantiate(
       new SessionManagerImpl(sparkSession, Some("something")),
       sparkSession.conf.get(FlintSparkConf.CUSTOM_SESSION_MANAGER.key, ""),
-      "dummy")
+      resultIndexOption.getOrElse(""))
   }
 
   private def handleCommandTimeout(
