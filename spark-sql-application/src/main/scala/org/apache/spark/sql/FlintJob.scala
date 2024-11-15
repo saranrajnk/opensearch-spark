@@ -77,17 +77,18 @@ object FlintJob extends Logging with FlintJobExecutor {
       return
     }
 
-    handleWarmpoolJob(applicationId, jobId, sparkSession)
+    handleWarmpoolJob(applicationId, jobId, sparkSession, resultIndexOption)
   }
 
   private def handleWarmpoolJob(
       applicationId: String,
       jobId: String,
-      sparkSession: SparkSession): Unit = {
+      sparkSession: SparkSession,
+      resultIndexOption: Option[String]): Unit = {
     sparkSession.conf.set(
       FlintSparkConf.CUSTOM_SESSION_MANAGER.key,
       "com.amazon.client.WarmpoolSessionManagerDqsImpl")
-    val sessionManager = instantiateSessionManager(sparkSession)
+    val sessionManager = instantiateSessionManager(sparkSession, resultIndexOption)
 
     var commandContext = CommandContext(
       applicationId,
@@ -362,7 +363,9 @@ object FlintJob extends Logging with FlintJobExecutor {
       "dummySessionId")
   }
 
-  private def instantiateSessionManager(sparkSession: SparkSession): SessionManager = {
+  private def instantiateSessionManager(
+      sparkSession: SparkSession,
+      resultIndexOption: Option[String]): SessionManager = {
     instantiate(
       new SessionManagerImpl(sparkSession, Some("something")),
       sparkSession.conf.get(FlintSparkConf.CUSTOM_SESSION_MANAGER.key, ""),
