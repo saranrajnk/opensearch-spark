@@ -164,27 +164,27 @@ object FlintJob extends Logging with FlintJobExecutor {
                 queryResultWriterClas)
             }
 
-//            if (!dataSource.contains("_CWLBasic")) {
-//              sparkSession.conf.set(
-//                FlintSparkConf.CUSTOM_FLINT_METADATA_LOG_SERVICE_CLASS.key,
-//                "com.amazon.client.FlintMetadataLogServiceDqsImpl")
-//              sparkSession.conf.set(
-//                FlintSparkConf.CUSTOM_FLINT_SCHEDULER_CLASS.key,
-//                "com.amazon.client.AsyncQuerySchedulerDqsImpl")
-//              sparkSession.conf.set(
-//                FlintSparkConf.CUSTOM_FLINT_INDEX_METADATA_SERVICE_CLASS.key,
-//                "com.amazon.client.FlintIndexMetadataServiceDqsImpl")
-//              sparkSession.conf.set(FlintSparkConf.HOST_ENDPOINT.key, host)
-//              sparkSession.conf.set(
-//                "spark.datasource.flint.customAWSCredentialsProvider",
-//                "com.amazon.fireflower.FireFlowerDataSourceAccessCredentialsProvider")
-//            } else {
-//              sparkSession.conf.set(FlintSparkConf.HOST_ENDPOINT.key, "localhost")
-//              sparkSession.conf.set(
-//                "spark.datasource.flint.customAWSCredentialsProvider",
-//                "com.amazonaws.emr.AssumeRoleAWSCredentialsProvider")
-//              sparkSession.conf.set("spark.flint.datasource.name", "_CWLBasic")
-//            }
+            if (!dataSource.contains("_CWLBasic")) {
+              sparkSession.conf.set(
+                FlintSparkConf.CUSTOM_FLINT_METADATA_LOG_SERVICE_CLASS.key,
+                "com.amazon.client.FlintMetadataLogServiceDqsImpl")
+              sparkSession.conf.set(
+                FlintSparkConf.CUSTOM_FLINT_SCHEDULER_CLASS.key,
+                "com.amazon.client.AsyncQuerySchedulerDqsImpl")
+              sparkSession.conf.set(
+                FlintSparkConf.CUSTOM_FLINT_INDEX_METADATA_SERVICE_CLASS.key,
+                "com.amazon.client.FlintIndexMetadataServiceDqsImpl")
+              sparkSession.conf.set(FlintSparkConf.HOST_ENDPOINT.key, host)
+              sparkSession.conf.set(
+                "spark.datasource.flint.customAWSCredentialsProvider",
+                "com.amazon.fireflower.FireFlowerDataSourceAccessCredentialsProvider")
+            } else {
+              sparkSession.conf.set(FlintSparkConf.HOST_ENDPOINT.key, "localhost")
+              sparkSession.conf.set(
+                "spark.datasource.flint.customAWSCredentialsProvider",
+                "com.amazonaws.emr.AssumeRoleAWSCredentialsProvider")
+              sparkSession.conf.set("spark.flint.datasource.name", "_CWLBasic")
+            }
 
             if (jobType.equalsIgnoreCase(FlintJobType.STREAMING) || jobType.equalsIgnoreCase(
                 FlintJobType.BATCH)) {
