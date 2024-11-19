@@ -369,9 +369,6 @@ case class FlintSparkConf(properties: JMap[String, String]) extends Serializable
       }
       .toMap
 
-    val temp = (optionsWithDefault ++ optionsWithoutDefault).asJava
-    CustomLogging.logInfo(s"FlintOptions from scala: ${temp}")
-
     new FlintOptions((optionsWithDefault ++ optionsWithoutDefault).asJava)
   }
 }

@@ -15,7 +15,7 @@ import scala.util.control.NonFatal
 import com.codahale.metrics.Timer
 import org.opensearch.flint.common.model.FlintStatement
 import org.opensearch.flint.core.logging.CustomLogging
-import org.opensearch.flint.core.metrics.MetricConstants
+import org.opensearch.flint.core.metrics.{MetricConstants, MetricsUtil}
 import org.opensearch.flint.core.metrics.MetricsUtil.{getTimerContext, incrementCounter, registerGauge, stopTimer}
 
 import org.apache.spark.SparkConf
@@ -103,8 +103,10 @@ object FlintJob extends Logging with FlintJobExecutor {
       -1, // FlintJob doesn't have queryWaitTimeMillis
       -1 // FlintJob doesn't have queryLoopExecutionFrequency
     )
-
-    registerGauge(MetricConstants.STATEMENT_RUNNING_METRIC, statementRunningCount)
+    val segmentName = sparkSession.conf.get("spark.dynamicAllocation.maxExecutors")
+    registerGauge(
+      String.format("%se.%s", segmentName, MetricConstants.STATEMENT_RUNNING_METRIC),
+      statementRunningCount)
     val statementExecutionManager = instantiateStatementExecutionManager(commandContext)
     var counter = 0
 
@@ -162,27 +164,27 @@ object FlintJob extends Logging with FlintJobExecutor {
                 queryResultWriterClas)
             }
 
-            if (!dataSource.contains("_CWLBasic")) {
-              sparkSession.conf.set(
-                FlintSparkConf.CUSTOM_FLINT_METADATA_LOG_SERVICE_CLASS.key,
-                "com.amazon.client.FlintMetadataLogServiceDqsImpl")
-              sparkSession.conf.set(
-                FlintSparkConf.CUSTOM_FLINT_SCHEDULER_CLASS.key,
-                "com.amazon.client.AsyncQuerySchedulerDqsImpl")
-              sparkSession.conf.set(
-                FlintSparkConf.CUSTOM_FLINT_INDEX_METADATA_SERVICE_CLASS.key,
-                "com.amazon.client.FlintIndexMetadataServiceDqsImpl")
-              sparkSession.conf.set(FlintSparkConf.HOST_ENDPOINT.key, host)
-              sparkSession.conf.set(
-                "spark.datasource.flint.customAWSCredentialsProvider",
-                "com.amazon.fireflower.FireFlowerDataSourceAccessCredentialsProvider")
-            } else {
-              sparkSession.conf.set(FlintSparkConf.HOST_ENDPOINT.key, "localhost")
-              sparkSession.conf.set(
-                "spark.datasource.flint.customAWSCredentialsProvider",
-                "com.amazonaws.emr.AssumeRoleAWSCredentialsProvider")
-              sparkSession.conf.set("spark.flint.datasource.name", "_CWLBasic")
-            }
+//            if (!dataSource.contains("_CWLBasic")) {
+//              sparkSession.conf.set(
+//                FlintSparkConf.CUSTOM_FLINT_METADATA_LOG_SERVICE_CLASS.key,
+//                "com.amazon.client.FlintMetadataLogServiceDqsImpl")
+//              sparkSession.conf.set(
+//                FlintSparkConf.CUSTOM_FLINT_SCHEDULER_CLASS.key,
+//                "com.amazon.client.AsyncQuerySchedulerDqsImpl")
+//              sparkSession.conf.set(
+//                FlintSparkConf.CUSTOM_FLINT_INDEX_METADATA_SERVICE_CLASS.key,
+//                "com.amazon.client.FlintIndexMetadataServiceDqsImpl")
+//              sparkSession.conf.set(FlintSparkConf.HOST_ENDPOINT.key, host)
+//              sparkSession.conf.set(
+//                "spark.datasource.flint.customAWSCredentialsProvider",
+//                "com.amazon.fireflower.FireFlowerDataSourceAccessCredentialsProvider")
+//            } else {
+//              sparkSession.conf.set(FlintSparkConf.HOST_ENDPOINT.key, "localhost")
+//              sparkSession.conf.set(
+//                "spark.datasource.flint.customAWSCredentialsProvider",
+//                "com.amazonaws.emr.AssumeRoleAWSCredentialsProvider")
+//              sparkSession.conf.set("spark.flint.datasource.name", "_CWLBasic")
+//            }
 
             if (jobType.equalsIgnoreCase(FlintJobType.STREAMING) || jobType.equalsIgnoreCase(
                 FlintJobType.BATCH)) {
@@ -205,7 +207,8 @@ object FlintJob extends Logging with FlintJobExecutor {
                 statementExecutionManager,
                 applicationId,
                 jobId,
-                dataSource)
+                dataSource,
+                segmentName)
             }
         }
       } catch {
@@ -235,7 +238,8 @@ object FlintJob extends Logging with FlintJobExecutor {
       statementExecutionManager: StatementExecutionManager,
       applicationId: String,
       jobId: String,
-      dataSource: String): Unit = {
+      dataSource: String,
+      segmentName: String): Unit = {
     implicit val ec: ExecutionContext = ExecutionContext.global
     var dataToWrite: Option[DataFrame] = None
     val startTime: Long = currentTimeProvider.currentEpochMillis()
@@ -268,6 +272,8 @@ object FlintJob extends Logging with FlintJobExecutor {
         })
     } catch {
       case e: TimeoutException =>
+        incrementCounter(
+          String.format("%se.%s", segmentName, MetricConstants.STATEMENT_EXECUTION_FAILED_METRIC))
         val error = s"Query execution preparation timed out"
         CustomLogging.logError(error, e)
         dataToWrite = Some(
@@ -281,6 +287,8 @@ object FlintJob extends Logging with FlintJobExecutor {
             "",
             startTime))
       case NonFatal(e) =>
+        incrementCounter(
+          String.format("%se.%s", segmentName, MetricConstants.STATEMENT_EXECUTION_FAILED_METRIC))
         val error = s"An unexpected error occurred: ${e.getMessage}"
         CustomLogging.logError(error, e)
         dataToWrite = Some(
@@ -294,6 +302,8 @@ object FlintJob extends Logging with FlintJobExecutor {
             "",
             startTime))
     } finally {
+      emitStatementQueryExecutionTimeMetric(startTime, segmentName)
+      val resultWriterStartTime: Long = currentTimeProvider.currentEpochMillis()
       try {
         dataToWrite.foreach(df => queryResultWriter.writeDataFrame(df, flintStatement))
         if (flintStatement.isRunning || flintStatement.isWaiting) {
@@ -301,15 +311,49 @@ object FlintJob extends Logging with FlintJobExecutor {
         }
       } catch {
         case e: Exception =>
+          incrementCounter(String
+            .format("%se.%s", segmentName, MetricConstants.STATEMENT_RESULT_WRITER_FAILED_METRIC))
           val error = s"""Fail to write result of ${flintStatement}, cause: ${e.getMessage}"""
           CustomLogging.logError(error, e)
           flintStatement.fail()
       } finally {
+        emitStatementResultWriterTimeMetric(resultWriterStartTime, segmentName)
+        emitStatementTotalTimeMetric(startTime, segmentName)
         statementExecutionManager.updateStatement(flintStatement)
-        recordStatementStateChange(statementRunningCount, flintStatement, statementTimerContext)
+        recordStatementStateChange(
+          statementRunningCount,
+          flintStatement,
+          statementTimerContext,
+          segmentName)
       }
       statementExecutionManager.terminateStatementExecution()
     }
+  }
+
+  private def emitStatementQueryExecutionTimeMetric(
+      startTime: Long,
+      segmentName: String): Unit = {
+    MetricsUtil
+      .addHistoricGauge(
+        String.format(
+          "%se.%s",
+          segmentName,
+          MetricConstants.STATEMENT_QUERY_EXECUTION_TIME_METRIC),
+        System.currentTimeMillis() - startTime)
+  }
+
+  private def emitStatementResultWriterTimeMetric(startTime: Long, segmentName: String): Unit = {
+    MetricsUtil
+      .addHistoricGauge(
+        String.format("%se.%s", segmentName, MetricConstants.STATEMENT_RESULT_WRITER_TIME_METRIC),
+        System.currentTimeMillis() - startTime)
+  }
+
+  private def emitStatementTotalTimeMetric(startTime: Long, segmentName: String): Unit = {
+    MetricsUtil
+      .addHistoricGauge(
+        String.format("%se.%s", segmentName, MetricConstants.STATEMENT_QUERY_TOTAL_TIME_METRIC),
+        System.currentTimeMillis() - startTime)
   }
 
   private def processStreamingJob(
@@ -331,6 +375,8 @@ object FlintJob extends Logging with FlintJobExecutor {
      * Without this setup, Spark would not recognize names in the format `my_glue1.default`.
      */
     sparkSession.conf.set("spark.sql.defaultCatalog", dataSource)
+    val segmentName = sparkSession.conf.get("spark.dynamicAllocation.maxExecutors")
+
 //    sparkSession.conf.set(
 //      "spark.dynamicAllocation.maxExecutors",
 //      sparkSession.conf
@@ -349,7 +395,9 @@ object FlintJob extends Logging with FlintJobExecutor {
         jobType,
         streamingRunningCount,
         statementContext)
-    registerGauge(MetricConstants.STREAMING_RUNNING_METRIC, streamingRunningCount)
+    registerGauge(
+      String.format("%se.%s", segmentName, MetricConstants.STREAMING_RUNNING_METRIC),
+      streamingRunningCount)
     jobOperator.start()
   }
 
@@ -424,15 +472,18 @@ object FlintJob extends Logging with FlintJobExecutor {
   private def recordStatementStateChange(
       statementRunningCount: AtomicInteger,
       flintStatement: FlintStatement,
-      statementTimerContext: Timer.Context): Unit = {
+      statementTimerContext: Timer.Context,
+      segmentName: String): Unit = {
     stopTimer(statementTimerContext)
     if (statementRunningCount.get() > 0) {
       statementRunningCount.decrementAndGet()
     }
     if (flintStatement.isComplete) {
-      incrementCounter(MetricConstants.STATEMENT_SUCCESS_METRIC)
+      incrementCounter(
+        String.format("%se.%s", segmentName, MetricConstants.STATEMENT_SUCCESS_METRIC))
     } else if (flintStatement.isFailed) {
-      incrementCounter(MetricConstants.STATEMENT_FAILED_METRIC)
+      incrementCounter(
+        String.format("%se.%s", segmentName, MetricConstants.STATEMENT_FAILED_METRIC))
     }
   }
 
