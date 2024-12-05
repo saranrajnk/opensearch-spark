@@ -154,10 +154,10 @@ case class JobOperator(
           throwableHandler.recordThrowable(
             s"Failed to write to result index. originalError='${throwableHandler.error}'",
             t)
+          incrementCounter(
+            String
+              .format("%se.%s", segmentName, MetricConstants.STREAMING_RESULT_WRITER_FAILED_METRIC))
       } finally {
-        incrementCounter(
-          String
-            .format("%se.%s", segmentName, MetricConstants.STREAMING_RESULT_WRITER_FAILED_METRIC))
         emitResultWriterTimeMetric(resultWriteStartTime, segmentName)
         emitTotalTimeMetric(startTime, segmentName)
       }
