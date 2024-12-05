@@ -297,15 +297,21 @@ object FlintJob extends Logging with FlintJobExecutor {
           flintStatement.complete()
         }
       } catch {
-        case e: Exception =>
+        case t: Throwable =>
           incrementCounter(String
             .format("%se.%s", segmentName, MetricConstants.STATEMENT_RESULT_WRITER_FAILED_METRIC))
-          val error = s"""Fail to write result of ${flintStatement}, cause: ${e.getMessage}"""
-          CustomLogging.logError(error, e)
+          val error =
+            s"""Fail to write result of ${flintStatement}, cause: ${throwableHandler.error}"""
+          throwableHandler.recordThrowable(error, t)
+          CustomLogging.logError(error, t)
           flintStatement.fail()
       } finally {
         emitStatementResultWriterTimeMetric(resultWriterStartTime, segmentName)
         emitStatementTotalTimeMetric(startTime, segmentName)
+
+        if (throwableHandler.hasException) flintStatement.fail() else flintStatement.complete()
+        flintStatement.error = Some(throwableHandler.error)
+
         statementExecutionManager.updateStatement(flintStatement)
         recordStatementStateChange(
           statementRunningCount,
