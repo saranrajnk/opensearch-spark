@@ -171,6 +171,12 @@ object FlintSparkConf {
     .doc("Enable external scheduler for index refresh")
     .createWithDefault("false")
 
+  val WARMPOOL_ENABLED =
+    FlintConfig("spark.flint.job.warmpoolEnabled")
+      .createWithDefault("false")
+
+  val MAX_EXECUTORS_COUNT = FlintConfig("spark.dynamicAllocation.maxExecutors").createOptional()
+
   val EXTERNAL_SCHEDULER_INTERVAL_THRESHOLD =
     FlintConfig("spark.flint.job.externalScheduler.interval")
       .doc("Interval threshold in minutes for external scheduler to trigger index refresh")
